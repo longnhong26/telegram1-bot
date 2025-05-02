@@ -1,49 +1,74 @@
-import telebot
 from flask import Flask, request
+import requests
+import re
 
-API_TOKEN = '7831505272:AAGRgRwNce221xAR9ER-Qo5Dv_LYRrjqOXg'
-bot = telebot.TeleBot(API_TOKEN)
+TOKEN = "7831505272:AAGRgRwNce221xAR9ER-Qo5Dv_LYRrjqOXg"
+API_URL = f"https://api.telegram.org/bot{TOKEN}"
+FB_CHECK_URL = "https://graph.facebook.com/"
+
 app = Flask(__name__)
 
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    bot.reply_to(message, "Chào bạn! Nhập UID Facebook để kiểm tra.")
+def parse_line(line):
+    parts = line.strip().split('|')
+    uid = parts[0] if len(parts) > 0 else ''
+    password = parts[1] if len(parts) > 1 else ''
+    fa2 = parts[2] if len(parts) > 2 else ''
+    cookie = ''
+    token = ''
+    email = ''
+    for p in parts[3:]:
+        if 'c_user=' in p:
+            cookie = p
+        elif p.startswith('EAAAA'):
+            token = p
+        elif '@' in p:
+            email = p
+    return uid, password, fa2, cookie, token, email
 
-@bot.message_handler(func=lambda message: True)
-def check_uids(message):
-    import requests
-    uids = message.text.split()
-    reply_lines = []
-    for uid in uids:
-        url = f"https://graph.facebook.com/{uid}/picture?redirect=false"
-        try:
-            res = requests.get(url).json()
-            if 'data' in res and 'url' in res['data']:
-                is_silhouette = res['data'].get('is_silhouette', True)
-                if not is_silhouette:
-                    status = "Nick Live"
-                else:
-                    status = "Nick Live (mặc định ảnh)"
-            else:
-                status = "Nick Die"
-            link = f"https://facebook.com/profile.php?id={uid}"
-            reply_lines.append(f"UID: {uid}\nTrạng thái: {status}\nLink: {link}")
-        except Exception as e:
-            reply_lines.append(f"UID: {uid}\nLỗi: {str(e)}")
+def check_facebook_uid(uid):
+    url = f"{FB_CHECK_URL}{uid}"
+    response = requests.get(url)
+    if response.status_code == 200 and 'id' in response.json():
+        return True
+    return False
 
-    reply = "\n\n".join(reply_lines)
-    bot.send_message(message.chat.id, reply)
+def build_reply(uid, password, fa2, cookie, token, email):
+    status = "Nick Live" if check_facebook_uid(uid) else "Nick Die"
+    link = f"https://facebook.com/profile.php?id={uid}"
+    result = f"""UID: {uid}
+Mật khẩu: {password}
+2FA: {fa2}
+Trạng thái: {status}
+Link: {link}
+"""
+    if cookie:
+        result += f"Cookie: {cookie}\n"
+    if token:
+        result += f"Token: {token}\n"
+    if email:
+        result += f"Email: {email}\n"
+    return result
 
-@app.route(f'/{API_TOKEN}', methods=['POST'])
+@app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
-    bot.process_new_updates([telebot.types.Update.de_json(request.stream.read().decode("utf-8"))])
-    return "!", 200
+    data = request.get_json()
+    if "message" in data:
+        chat_id = data["message"]["chat"]["id"]
+        text = data["message"].get("text", "")
+        lines = text.strip().splitlines()
+        reply = ""
+        for line in lines:
+            if "|" in line:
+                uid, password, fa2, cookie, token, email = parse_line(line)
+                if uid and password:
+                    reply += build_reply(uid, password, fa2, cookie, token, email) + "\n"
+        if reply:
+            requests.post(f"{API_URL}/sendMessage", json={"chat_id": chat_id, "text": reply})
+    return {"ok": True}
 
-@app.route('/')
-def index():
-    return 'Bot is running via webhook!'
+@app.route("/")
+def home():
+    return "Bot is running!"
 
-if name == '__main__':
-    import os
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host="0.0.0.0", port=port)
+if __name__ == "__main__":
+    app.run()
